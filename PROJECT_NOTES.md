@@ -1,300 +1,132 @@
 # Project Notes
 
-Working notes for the STM32 standby pump controller project.
+> **Current image:** DIP3 ON at startup runs the LED-only durability test. All DIPs OFF
+> runs production AUTO. DIP1/DIP2 are reserved. The test repeats 20 IND1..IND9
+> scans, then 20 all-LED blinks, at 60 ms per step. Both relays remain OFF.
+> The raw all-output PIN_TEST diagnostic is disabled.
 
-This file is intended to capture project knowledge that is easy to lose between sessions:
 
-- hardware assumptions
-- IO mapping decisions
-- logic conventions
-- known caveats
-- validation still required
+## Current baseline
 
-## Project Summary
+- MCU: STM32F405RGT6, LQFP64
+- Hardware source of truth: `Kicad/stby_pump_v4` and `Kicad/Display`
+- Firmware package: STM32CubeF4 `1.28.3`
+- `.ioc` authoring version: STM32CubeMX `6.15.0`
+- Compiler validated: GNU Tools for STM32 `14.3.1`
+- System clock: 8 MHz HSE crystal, PLL to 168 MHz
+- Current behavior: DIPs OFF = production AUTO; DIP3 ON = LED-only durability test
+- Compile-time configuration: `Core/Inc/stby_config.h`
+- Exact electrical mapping: `HARDWARE_IO_MAP.md`
 
-- MCU: `STM32F405RGTx`
-- IDE: `STM32CubeIDE 1.19.0`
-- Framework: STM32 HAL / CubeMX generated project
-- Main application file: `Core/Src/main.c`
-- Current application mode in code: `AUTO`
+## Control behavior
 
-## Control Philosophy
+The firmware supports `AUTO`, `MANUAL`, and `TEST` builds.
 
-- Manual selector-based pump controller
-- Control modes supported by code:
-  - `AUTO`
-  - `MANUAL`
-  - `TEST`
-- Current build is configured for `AUTO`
-- In dual-pump builds:
-  - selector chooses `OFF`, `PUMP 1`, or `PUMP 2`
-  - only one pump may run at a time
-  - no automatic transfer to the other pump
-  - operator must acknowledge fault and manually select the other pump if needed
+In `AUTO`:
 
-## Input Logic
+1. The two-bit selector chooses OFF, Pump 1 primary, or Pump 2 primary.
+2. Demand exists when the selected pump has pressure-low active or RPM inactive.
+3. The primary starts only when its AC-ready input is active.
+4. Missing feedback for 3 seconds causes transfer to the available secondary.
+5. If all available pumps fail feedback, both relays turn off and the standby alarm latches.
+6. ACK clears the latch and restarts from OFF.
 
-### Active low inputs
+In `MANUAL`, the selector requests one pump directly. Process inputs do not gate the command. The common output encoder still enforces mutual exclusion and a 100 ms break-before-make interval.
 
-These are currently treated as active low in `Core/Src/main.c`:
+DIP3 ON (closed to GND, PB2 / S1 contacts 1-4) selects the LED durability test.
+It repeats 20 complete IND1 -> IND9 scans, then 20 all-on/all-off blinks.
+Each LED step and blink half-period lasts 60 ms (nominal 13.2 s per pattern).
+SYS LEDs alternate during scans and blink together during the all-LED phase.
+Both relay commands remain OFF; process/panel inputs, including AC and ACK,
+do not affect the pattern. DIP1 and DIP2 are reserved and ignored.
 
-- `SEL_P1`
-- `SEL_P2`
-- `ACK_LT1`
-- `I3`
-- `I5`
-- `I6`
-- `I8`
-- `AC1_IN`
-- `AC2_IN`
-- `IN Pressure switch pump 1`
-- `IN Pressure switch pump 2`
+DIP3 is read once at startup. DIP3 OFF at startup selects production AUTO;
+DIP3 ON at startup selects the LED test. Moving any DIP while powered has no
+effect: restart/reset the module to change mode. DIP1/DIP2 remain reserved.
+Normal inputs can request a pump in AUTO. The confirmed 100 ms relay
+break-before-make protection remains active.
 
-Reason:
+## Input conventions
 
-- ACK and pressure inputs use pull-up resistors
-- active state is the low state
+- Pressure: active low, 200 ms debounce
+- RPM: active high, 2 s debounce
+- Feedback: active low, 200 ms debounce
+- AC-ready: active low
+- Selector: active low, 200 ms debounce
+- ACK: active low, 50 ms debounce
+- ACK long press / lamp test: 1.5 seconds
 
-### Active high inputs
+All six DI channels are PC817 collector outputs with external pull-ups. The display contacts and AC inputs are captured by U3, a 74HC165 read through SPI2.
 
-These are currently treated as active high in `Core/Src/main.c`:
+## Unresolved panel assignment
 
-- `I4`
-- `I7`
-- `IN RPM switch pump 1`
-- `IN RPM switch pump 2`
+The current KiCad design electrically labels the four display contacts only as `IN_DISP1..4`. It does not say which physical contact is selector Pump 1, selector Pump 2, ACK, or spare.
 
-Reason:
+The firmware default is:
 
-- RPM inputs use external pull-up hardware
-- firmware treats the high state as active
-- RPM input debounce is `2 s` using `T_RPM_DEBOUNCE_MS`
+- `IN_DISP1` = selector Pump 1
+- `IN_DISP2` = selector Pump 2
+- `IN_DISP3` = ACK / lamp test
+- `IN_DISP4` = reserved
 
-Current polarity defines:
+These are isolated in `Core/Inc/stby_config.h`. Confirm the external panel harness before energizing Q1 or Q2.
 
-- `PRESSURE_ACTIVE_LEVEL = 0U`
-- `RPM_ACTIVE_LEVEL = 1U`
-- `AC_ACTIVE_LEVEL = 0U`
-- `SELECTOR_ACTIVE_LEVEL = 0U`
-- `ACK_LT1_ACTIVE_LEVEL = 0U`
-- `FEEDBACK_ACTIVE_LEVEL = 0U`
+## Output safety
 
-## Selector Wiring
+- The current PCB has two 74HC595 devices, not three.
+- U2 is nearest to the MCU and drives IND1..IND8 through U1.
+- U5 is farthest and drives IND9, Q1, and Q2 through U4.
+- The transmitted order is U5 byte first, U2 byte second.
+- U2/U5 output-enable pins are tied to ground. PA6 is not connected.
+- Firmware writes an all-zero frame at startup.
+- If both pump commands are ever requested together, both are forced off.
+- A Pump 1/Pump 2 change includes at least 100 ms after a successful all-off latch; SPI failure restarts this requirement.
 
-- `PA10` = `SEL_P1`
-- `PA11` = `SEL_P2`
-- selector contacts now pull the input to `GND`
-- selector inputs use internal pull-up and are active low
+## Reserved hardware
 
-Expected selector decode:
+The revised board includes hardware not yet used by the controller application:
 
-- normalized `SEL_P1=0`, `SEL_P2=0` -> `OFF`
-- normalized `SEL_P1=1`, `SEL_P2=0` -> `PUMP 1`
-- normalized `SEL_P1=0`, `SEL_P2=1` -> `PUMP 2`
-- normalized `SEL_P1=1`, `SEL_P2=1` -> `INVALID`
+- PA0 NTC analog input
+- PB8/PB9 CAN transceiver
+- PA11/PA12 USB connector
 
-GPIO assumptions:
+These pins are not used as substitutes for process inputs. CAN, USB, and ADC middleware remain intentionally uninitialized until their behavior is specified.
 
-- `PA10`, `PA11` use pull-up configuration
+## Schematic/PCB review status
 
-## ACK Input
+- Current main schematic ERC: one warning because `GND` and `DC-` are joined in the power sheet.
+- Current main PCB DRC: 23 warning-level track/via items and 19 unconnected GND items.
+- Display schematic ERC: clean.
+- Display PCB DRC: clean with zero unconnected items.
 
-- `ACK_LT1` on `PH0` is active low and uses internal pull-up
-- short press = ACK
-- long press = ACK + lamp test
+The main PCB should not be considered fabrication-clean until its GND connectivity is fixed and DRC is rerun. This does not change the firmware mapping above, but it matters for board bring-up.
 
-## Pump Feedback
-
-- `I5` = Pump 1 feedback, active low, external pull-up hardware
-- `I8` = Pump 2 feedback, active low, external pull-up hardware
-- `Pump 1 ON` follows the Pump 1 feedback input
-- `Pump 2 ON` follows the Pump 2 feedback input
-
-## DC / Pump IO Mapping
-
-### New DC order
-
-- `Q1` = Output pump 1
-- `Q2` = Output pump 2
-- `Q3` = unused / reserved
-- `I3` = IN Pressure switch pump 1
-- `I4` = IN RPM switch pump 1
-- `I5` = IN Feedback pump 1
-- `I6` = IN Pressure switch pump 2
-- `I7` = IN RPM switch pump 2
-- `I8` = IN Feedback pump 2
-
-### MCU direct input pins
-
-- `I3` -> `PD2`
-- `I4` -> `PB3`
-- `I5` -> `PB4`
-- `I6` -> `PB5`
-- `I7` -> `PB6`
-- `I8` -> `PB7`
-- `ACK_LT1` -> `PH0`
-- `AC1_IN` -> `PB8`
-- `AC2_IN` -> `PB9`
-
-### Relay outputs
-
-Relay outputs are not direct MCU pins.
-
-They are driven through:
-
-- SPI -> `74HC595`
-- `74HC595` -> `ULN2803A`
-- `ULN2803A` -> relay/load nets
-
-MCU control pins for the shift register chain:
-
-- `PA5` = `SPI1_SCK`
-- `PA7` = `SPI1_MOSI`
-- `PA4` = `SR_LATCH`
-- `PA6` = `SR_OE`
-
-## Shift Register Notes
-
-Physical chain order from MCU:
-
-- `MCU -> U1 -> U3 -> U6`
-
-Intended function:
-
-- `U1` = relay byte
-- `U3` = LED byte 1
-- `U6` = LED byte 2
-
-Write sequence required by hardware:
-
-1. `OE HIGH`
-2. SPI transmit 3 bytes
-3. latch pulse
-4. `OE LOW`
-
-That sequence is implemented in `SR_Write24()`.
-
-## Important Hardware Mapping Decision
-
-### Relay/DC board is reversed
-
-Based on the relay board schematic review:
-
-- `74HC595 QA..QH` do not land on `Q1..Q8` in ascending order
-- relay outputs are effectively reversed through the board wiring
-
-Effective mapping for the relay byte:
-
-- `bit 7` -> `Q1`
-- `bit 6` -> `Q2`
-- `bit 5` -> `Q3`
-- `bit 4` -> `Q4`
-- `bit 3` -> `Q5`
-- `bit 2` -> `Q6`
-- `bit 1` -> `Q7`
-- `bit 0` -> `Q8`
-
-Current code was updated to match this for the used outputs:
-
-- `Pump 1` -> `bit 7`
-- `Pump 2` -> `bit 6`
-- `Q3 unused` -> `bit 5`
-
-### LED boards are straight
-
-The LED banks were reviewed separately and are not reversed.
-
-For LED bank 1:
-
-- `bit 0` -> `IND1`
-- `bit 1` -> `IND2`
-- `bit 2` -> `IND3`
-- `bit 3` -> `IND4`
-
-For LED bank 2:
-
-- `bit 0` -> `IND9`
-- `bit 1` -> `IND10`
-- `bit 2` -> `IND11`
-- `bit 3` -> `IND12`
-- `bit 4` -> `IND13`
-
-## LED Meaning
-
-- `IND9` = System ready
-- `IND1` = Pump 1 ready
-- `IND10` = Pump 1 ON
-- `IND2` = Pump 1 standby
-- `IND11` = Pump 2 ready
-- `IND3` = Pump 2 ON
-- `IND12` = Pump 2 standby
-- `IND4` = Pressure low
-- `IND13` = Standby alarm
-
-Current logic meaning:
-
-- `System ready` = module powered and firmware running
-- `Pump ready` = `ACx_IN` ready input is active
-- `Pump ON` = matching pump feedback active
-- `Pump standby` = selected pump indicator
-- `Pressure low` = demand active
-- `Standby alarm` = latched `3 s` no-feedback alarm, blinking on the module indicator
-
-## State Machine Notes
-
-`AUTO` mode rules:
-
-1. run request exists when the selected pump sees `pressure_low` active or `rpm` inactive
-2. the selected pump is primary and the other pump is secondary
-3. on demand, the controller tries the primary pump first if it is ready
-4. if the primary has no feedback after `3 s`, the controller tries the secondary pump if it is ready
-5. if both available pumps fail feedback, outputs turn off and alarm latches
-6. `AC` not ready is skip-only, not a fault
-7. selector `OFF` or `INVALID` stops the automatic controller with no alarm
-8. ACK from alarm resets the controller to a fresh `OFF` state
-
-`MANUAL` mode rules:
-
-1. selector `PUMP 1` forces Pump 1 on
-2. selector `PUMP 2` forces Pump 2 on
-3. selector `OFF` turns outputs off
-4. pressure, RPM, AC, and feedback do not gate the output command
-5. manual mode is open loop and does not use standby alarm
-
-Common fault rule:
-
-1. in `AUTO`, the feedback-timeout fault is only latched after all available pumps have failed feedback
-2. alarm does not auto-clear from feedback returning later
-3. ACK clears the latched alarm and returns the module to a fresh start
-
-ACK/Lamp test behavior:
-
-- short press on `ACK_LT1` = ACK
-- long press on `ACK_LT1` = ACK + lamp test
-
-## Known Build Status
-
-- project builds successfully with STM32CubeIDE bundled GNU toolchain
-- no blocking build warnings were observed in the latest verified build
-
-## Validation Still Required
-
-Bench validation is still required for:
-
-- selector decode on real hardware
-- ACK short press behavior
-- lamp test long press behavior
-- real shift-register relay mapping
-- real LED mapping
-- `AC1_IN` / `AC2_IN` ready behavior
-- run and stop behavior from pressure / RPM inputs
-
-## Datasheets Provided
-
-Reference files shared during review:
-
-- `74HC595.pdf`
-- `ULN2803A.pdf`
-- `stm32f407vgt6 datasheet.pdf`
-
-These were used as reference for pin/function reasoning, but the board schematic remains the source of truth for final signal mapping.
+## Bench validation required
+
+1. Disconnect both pump starters or use low-energy test loads.
+2. Confirm the four display-contact functions.
+3. Confirm SPI2 input bit order and AC1/AC2 polarity.
+4. Confirm U5-first/U2-second output order.
+5. Check IND1..IND9 one at a time.
+6. Check Q1 and Q2 independently.
+7. Measure the 100 ms all-off interval during a pump change.
+8. Validate feedback timeout, failover, alarm latch, ACK, and lamp test.
+
+## DIP test validation (2026-09-22)
+
+- HAL and CMSIS HSE definitions corrected to match Y1 at 8 MHz.
+- Debug and Release TEST images built successfully.
+- ARM simulation passed speed selection, relay/LED sequencing, debounce,
+  ACK handling, SPI failure recovery, mutual exclusion, and tick rollover.
+- No physical relay or LED operation has been verified by these simulations.
+
+## Inverter remote/local permission
+
+AC1/AC2 indicate the corresponding inverter remote permission (active = permitted),
+not pump-running feedback. Each relay requires its own permission continuously,
+including in MANUAL mode. Loss is handled on the next input/control pass (nominal
+20 ms loop, plus hardware sensing delay). AUTO cancels the current attempt and
+re-evaluates available pumps, retaining the 100 ms relay transfer gap. Permission
+loss itself is not recorded as a pump-running feedback timeout. DI3/DI6 remain
+separate pump-running feedback inputs with the existing 3-second start timeout.
+DIP3 LED durability mode keeps both relays OFF regardless of permission.

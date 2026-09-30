@@ -1,0 +1,36 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "stm32-debug",
+      "displayName": "STM32F405 Debug",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/stm32-debug",
+      "toolchainFile": "${sourceDir}/cmake/arm-none-eabi-gcc.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_MAKE_PROGRAM": "$env{LOCALAPPDATA}/stm32cube/bundles/ninja/1.13.2+st.1/bin/ninja.exe",
+        "STM32_GNU_TOOLS_VERSION": "14.3.1+st.2"
+      }
+    },
+    {
+      "name": "stm32-release",
+      "displayName": "STM32F405 Release",
+      "inherits": "stm32-debug",
+      "binaryDir": "${sourceDir}/build/stm32-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "stm32-debug",
+      "configurePreset": "stm32-debug"
+    },
+    {
+      "name": "stm32-release",
+      "configurePreset": "stm32-release"
+    }
+  ]
+}

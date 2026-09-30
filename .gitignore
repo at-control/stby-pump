@@ -1,5 +1,7 @@
 Debug/
 Release/
+build/
+tmp/
 
 *.elf
 *.map

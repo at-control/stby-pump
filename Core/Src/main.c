@@ -8,7 +8,6 @@
  *
  * Copyright (c) 2026 STMicroelectronics.
  * All rights reserved.
- *
  * This software is licensed under terms that can be found in the LICENSE file
  * in the root directory of this software component.
  * If no LICENSE file comes with this software, it is provided AS-IS.
@@ -21,6 +20,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "stby_config.h"
 #include <string.h>
 
 /* USER CODE END Includes */
@@ -120,34 +120,20 @@ typedef struct
 
 #define SR_LATCH_GPIO SR_LATCH_GPIO_Port
 #define SR_LATCH_PIN SR_LATCH_Pin
-#define SR_OE_GPIO SR_OE_GPIO_Port
-#define SR_OE_PIN SR_OE_Pin
-
-#define K_ACTIVE_LOW 0
-
 /* ---------------- Configuration ---------------- */
-/* Choose one firmware behavior:
-   CONTROL_MODE_AUTO   = pressure/RPM-driven automatic controller
-   CONTROL_MODE_MANUAL = selector directly forces pump output on/off
-   CONTROL_MODE_TEST   = relay and indicator IO test firmware
-*/
-#define CONTROL_MODE_AUTO 0U
-#define CONTROL_MODE_MANUAL 1U
-#define CONTROL_MODE_TEST 2U
-
-/* Change only this line to select the firmware behavior. */
-#define CONTROL_MODE CONTROL_MODE_AUTO
-
-/* Change this to adjust the output-test repeat time. */
-#define OUTPUT_TEST_REPEAT_MS 200U
+#define CONTROL_MODE_AUTO STBY_CONTROL_MODE_AUTO
+#define CONTROL_MODE_MANUAL STBY_CONTROL_MODE_MANUAL
+#define CONTROL_MODE_TEST STBY_CONTROL_MODE_TEST
+#define CONTROL_MODE_PIN_TEST STBY_CONTROL_MODE_PIN_TEST
+#define CONTROL_MODE STBY_CONTROL_MODE
 
 /* Input polarities: set 1 if active high, 0 if active low */
-#define PRESSURE_ACTIVE_LEVEL 0U
-#define RPM_ACTIVE_LEVEL 1U
-#define AC_ACTIVE_LEVEL 0U
-#define FEEDBACK_ACTIVE_LEVEL 0U
-#define SELECTOR_ACTIVE_LEVEL 0U
-#define ACK_LT1_ACTIVE_LEVEL 0U
+#define PRESSURE_ACTIVE_LEVEL STBY_PRESSURE_ACTIVE_LEVEL
+#define RPM_ACTIVE_LEVEL STBY_RPM_ACTIVE_LEVEL
+#define AC_ACTIVE_LEVEL STBY_AC_ACTIVE_LEVEL
+#define FEEDBACK_ACTIVE_LEVEL STBY_FEEDBACK_ACTIVE_LEVEL
+#define SELECTOR_ACTIVE_LEVEL STBY_SELECTOR_ACTIVE_LEVEL
+#define ACK_LT1_ACTIVE_LEVEL STBY_ACK_ACTIVE_LEVEL
 
 /* Timing */
 #define LOOP_DELAY_MS 20U
@@ -157,7 +143,8 @@ typedef struct
 #define T_ACK_LONGPRESS_MS 1500U
 #define T_BLINK_MS 500U
 #define T_FEEDBACK_TIMEOUT_MS 3000U
-#define T_OUTPUT_TEST_STEP_MS OUTPUT_TEST_REPEAT_MS
+#define T_OUTPUT_TEST_STEP_MS STBY_OUTPUT_TEST_STEP_MS
+#define T_RELAY_BREAK_BEFORE_MAKE_MS STBY_RELAY_BREAK_BEFORE_MAKE_MS
 
 #define FAULT_P1_FEEDBACK_TIMEOUT_MASK (1UL << 0)
 #define FAULT_P2_FEEDBACK_TIMEOUT_MASK (1UL << 1)
@@ -171,6 +158,7 @@ typedef struct
 
 /* Private variables ---------------------------------------------------------*/
 SPI_HandleTypeDef hspi1;
+SPI_HandleTypeDef hspi2;
 
 /* USER CODE BEGIN PV */
 
@@ -199,16 +187,19 @@ static uint8_t g_lamp_test_active = 0;
 static uint8_t g_lamp_test_group_step = 0U;
 static uint8_t g_lamp_test_prev_active = 0U;
 static uint32_t g_lamp_test_tick = 0U;
-static MAYBE_UNUSED uint8_t g_test_relay_step = 0U;
-static MAYBE_UNUSED uint8_t g_test_led_step = 0U;
-static MAYBE_UNUSED uint32_t g_test_relay_tick = 0U;
-static MAYBE_UNUSED uint32_t g_test_led_tick = 0U;
-static MAYBE_UNUSED uint8_t g_test_ack_group_size = 1U;
-static MAYBE_UNUSED uint8_t g_test_ack_group_index = 0U;
-static MAYBE_UNUSED uint8_t g_test_ack_group_pass = 0U;
-static MAYBE_UNUSED uint8_t g_test_ack_active_last = 0U;
+static uint8_t g_test_led_step = 0U;
+static uint32_t g_test_step_tick = 0U;
+static uint8_t g_test_dip_stable = 0U;
+static uint8_t g_test_initialized = 0U;
+static uint8_t g_pin_test_initialized = 0U;
+static uint8_t g_pin_test_byte = 0U;
+static uint32_t g_pin_test_tick = 0U;
 static uint8_t g_test_sys_led1 = 0U;
 static uint8_t g_test_sys_led2 = 0U;
+/* State of the last successfully latched relay frame. */
+static SelectorState_t g_relay_active = SELECTOR_INVALID;
+static uint8_t g_relay_off_confirmed = 0U;
+static uint32_t g_relay_break_tick = 0U;
 
 /* Debounced values */
 static uint8_t db_pressure_p1 = 0;
@@ -241,6 +232,7 @@ static uint32_t db_tick_ack_lt1 = 0;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_SPI1_Init(void);
+static void MX_SPI2_Init(void);
 /* USER CODE BEGIN PFP */
 
 static void ReadRawInputs(void);
@@ -248,7 +240,9 @@ static void ProcessInputs(void);
 static void UpdateSysLeds(void);
 
 static void SR_LatchPulse(void);
-static void SR_Write24(uint8_t u1, uint8_t u2, uint8_t u3);
+static void SR_Write16(uint8_t far_u5, uint8_t near_u2);
+static uint8_t PISO_Read8(void);
+static void ApplyRelayInterlock(void);
 static void UpdateOutputs(void);
 
 static uint8_t NormalizeLevel(uint8_t raw_active, uint8_t active_level);
@@ -262,7 +256,6 @@ static MAYBE_UNUSED void RunTestModeSection(void);
 static MAYBE_UNUSED void RunOutputTestProgram(void);
 static void SetTestIndicatorByOrder(uint8_t index);
 static void ApplyLampTestGroupToOutputs(uint8_t group);
-static void ApplyLampTestGroupToLedBytes(uint8_t group, uint8_t *led_byte_1, uint8_t *led_byte_2);
 
 static void StopAllPumps(void);
 static void EnterPumpChannelState(PumpChannel_t *channel, PumpState_t new_state);
@@ -316,31 +309,23 @@ static void DebounceBit(uint8_t raw, uint8_t *db, uint32_t *tick, uint32_t debou
 
 static void ReadRawInputs(void)
 {
-    /* DC IO map:
-       1 = Output pump 1
-       2 = Output pump 2
-       3 = Pressure switch pump 1
-       4 = RPM switch pump 1
-       5 = Feedback pump 1
-       6 = Pressure switch pump 2
-       7 = RPM switch pump 2
-       8 = Feedback pump 2
-    */
+    uint8_t piso = PISO_Read8();
 
-    g_raw.pressure_p1_raw = PIN_IS_ACTIVE(I3_GPIO_Port, I3_Pin);
-    g_raw.rpm_p1_raw = PIN_IS_ACTIVE(I4_GPIO_Port, I4_Pin);
-    g_raw.fb_p1_raw = PIN_IS_ACTIVE(I5_GPIO_Port, I5_Pin);
+    /* Revised J2 map: DI1..DI6 are the six opto-isolated process inputs. */
+    g_raw.pressure_p1_raw = PIN_IS_ACTIVE(I1_GPIO_Port, I1_Pin);
+    g_raw.rpm_p1_raw = PIN_IS_ACTIVE(I2_GPIO_Port, I2_Pin);
+    g_raw.fb_p1_raw = PIN_IS_ACTIVE(I3_GPIO_Port, I3_Pin);
 
-    g_raw.pressure_p2_raw = PIN_IS_ACTIVE(I6_GPIO_Port, I6_Pin);
-    g_raw.rpm_p2_raw = PIN_IS_ACTIVE(I7_GPIO_Port, I7_Pin);
-    g_raw.fb_p2_raw = PIN_IS_ACTIVE(I8_GPIO_Port, I8_Pin);
+    g_raw.pressure_p2_raw = PIN_IS_ACTIVE(I4_GPIO_Port, I4_Pin);
+    g_raw.rpm_p2_raw = PIN_IS_ACTIVE(I5_GPIO_Port, I5_Pin);
+    g_raw.fb_p2_raw = PIN_IS_ACTIVE(I6_GPIO_Port, I6_Pin);
 
-    g_raw.ac_p1_raw = PIN_IS_ACTIVE(AC1_IN_GPIO_Port, AC1_IN_Pin);
-    g_raw.ac_p2_raw = PIN_IS_ACTIVE(AC2_IN_GPIO_Port, AC2_IN_Pin);
-
-    g_raw.ack_lt1_raw = PIN_IS_ACTIVE(ACK_LT1_GPIO_Port, ACK_LT1_Pin);
-    g_raw.sel_p1_raw = PIN_IS_ACTIVE(SEL_P1_GPIO_Port, SEL_P1_Pin);
-    g_raw.sel_p2_raw = PIN_IS_ACTIVE(SEL_P2_GPIO_Port, SEL_P2_Pin);
+    /* U3 74HC165: D0..D3 = display contacts, D6/D7 = AC1/AC2. */
+    g_raw.sel_p1_raw = (uint8_t)((piso >> STBY_DISP_SEL_P1_BIT) & 0x01U);
+    g_raw.sel_p2_raw = (uint8_t)((piso >> STBY_DISP_SEL_P2_BIT) & 0x01U);
+    g_raw.ack_lt1_raw = (uint8_t)((piso >> STBY_DISP_ACK_BIT) & 0x01U);
+    g_raw.ac_p1_raw = (uint8_t)((piso >> 6U) & 0x01U);
+    g_raw.ac_p2_raw = (uint8_t)((piso >> 7U) & 0x01U);
 }
 
 static void ProcessInputs(void)
@@ -420,11 +405,27 @@ static void ProcessInputs(void)
 
 static void UpdateSysLeds(void)
 {
-#if (CONTROL_MODE == CONTROL_MODE_TEST)
+#if (CONTROL_MODE == CONTROL_MODE_PIN_TEST)
     HAL_GPIO_WritePin(SYS_LED1_GPIO_Port, SYS_LED1_Pin,
                       g_test_sys_led1 ? LED_ON_STATE : LED_OFF_STATE);
     HAL_GPIO_WritePin(SYS_LED2_GPIO_Port, SYS_LED2_Pin,
                       g_test_sys_led2 ? LED_ON_STATE : LED_OFF_STATE);
+#elif (CONTROL_MODE == CONTROL_MODE_TEST)
+    if (g_test_dip_stable != 0U)
+    {
+        HAL_GPIO_WritePin(SYS_LED1_GPIO_Port, SYS_LED1_Pin,
+                          g_test_sys_led1 ? LED_ON_STATE : LED_OFF_STATE);
+        HAL_GPIO_WritePin(SYS_LED2_GPIO_Port, SYS_LED2_Pin,
+                          g_test_sys_led2 ? LED_ON_STATE : LED_OFF_STATE);
+    }
+    else
+    {
+        /* Production status: AC presence is steady, otherwise heartbeat. */
+        HAL_GPIO_WritePin(SYS_LED1_GPIO_Port, SYS_LED1_Pin,
+                          (g_in.ac_p1 || g_in.ac_p2) ? LED_ON_STATE : LED_OFF_STATE);
+        HAL_GPIO_WritePin(SYS_LED2_GPIO_Port, SYS_LED2_Pin,
+                          (g_in.ac_p1 || g_in.ac_p2 || g_alarm_blink) ? LED_ON_STATE : LED_OFF_STATE);
+    }
 #else
     HAL_GPIO_WritePin(SYS_LED1_GPIO_Port, SYS_LED1_Pin, LED_OFF_STATE);
     HAL_GPIO_WritePin(SYS_LED2_GPIO_Port, SYS_LED2_Pin,
@@ -438,36 +439,69 @@ static void SR_LatchPulse(void)
     HAL_GPIO_WritePin(SR_LATCH_GPIO, SR_LATCH_PIN, GPIO_PIN_RESET);
 }
 
-static void SR_Write24(uint8_t u1, uint8_t u2, uint8_t u3)
+static uint8_t PISO_Read8(void)
 {
-    uint8_t tx[3];
+    uint8_t tx_dummy = 0xFFU;
+    uint8_t rx = 0xFFU;
+    volatile uint32_t settle;
 
-    if (K_ACTIVE_LOW)
+    HAL_GPIO_WritePin(SPI2_SH_LD_GPIO_Port, SPI2_SH_LD_Pin, GPIO_PIN_RESET);
+    for (settle = 0U; settle < 32U; settle++)
     {
-        u1 = (uint8_t)~u1;
-        u2 = (uint8_t)~u2;
-        u3 = (uint8_t)~u3;
+        __NOP();
+    }
+    HAL_GPIO_WritePin(SPI2_SH_LD_GPIO_Port, SPI2_SH_LD_Pin, GPIO_PIN_SET);
+    for (settle = 0U; settle < 32U; settle++)
+    {
+        __NOP();
     }
 
-    /* Physical chain: MCU -> U1 -> U3 -> U6 */
-    tx[0] = u3; // U6 = LED2 (farthest)
-    tx[1] = u2; // U3 = LED1
-    tx[2] = u1; // U1 = relay (nearest)
-
-    /* Disable outputs (OE HIGH) */
-    HAL_GPIO_WritePin(SR_OE_GPIO, SR_OE_PIN, GPIO_PIN_SET);
-
-    /* Shift data */
-    if (HAL_SPI_Transmit(&hspi1, tx, 3, 10U) != HAL_OK)
+    if (HAL_SPI_TransmitReceive(&hspi2, &tx_dummy, &rx, 1U, 10U) != HAL_OK)
     {
-        return;
+        /* Pull-ups make 0xFF the non-active fail-safe value for display/AC inputs. */
+        rx = 0xFFU;
     }
 
-    /* Latch */
-    SR_LatchPulse();
+    return rx;
+}
 
-    /* Enable outputs (OE LOW) */
-    HAL_GPIO_WritePin(SR_OE_GPIO, SR_OE_PIN, GPIO_PIN_RESET);
+static void SR_Write16(uint8_t far_u5, uint8_t near_u2)
+{
+    uint8_t tx[2];
+
+    /* Physical chain: MCU -> U2 (IND1..8) -> U5 (IND9, Q1, Q2). */
+    tx[0] = far_u5;
+    tx[1] = near_u2;
+
+    if (HAL_SPI_Transmit(&hspi1, tx, 2U, 10U) == HAL_OK)
+    {
+        SelectorState_t latched = SELECTOR_OFF;
+        SR_LatchPulse();
+        if ((far_u5 & 0xC0U) == 0x40U)
+            latched = SELECTOR_P1;
+        else if ((far_u5 & 0xC0U) == 0x80U)
+            latched = SELECTOR_P2;
+        else if ((far_u5 & 0xC0U) != 0U)
+            latched = SELECTOR_INVALID;
+
+        if (latched == SELECTOR_OFF)
+        {
+            if ((g_relay_active != SELECTOR_OFF) || !g_relay_off_confirmed)
+                g_relay_break_tick = HAL_GetTick();
+            g_relay_off_confirmed = 1U;
+        }
+        else
+        {
+            g_relay_off_confirmed = 0U;
+        }
+        g_relay_active = latched;
+    }
+    else
+    {
+        /* Force a confirmed OFF frame and a fresh gap before any restart. */
+        g_relay_active = SELECTOR_INVALID;
+        g_relay_off_confirmed = 0U;
+    }
 }
 
 static void ClearOutputs(void)
@@ -679,32 +713,32 @@ static void SetTestIndicatorByOrder(uint8_t index)
     switch (index)
     {
     case 0:
-        g_out.ind1_system_ready = 1U; /* IND9  */
+        g_out.ind1_system_ready = 1U;
         break;
     case 1:
-        g_out.ind2_p1_ready = 1U;     /* IND1  */
+        g_out.ind2_p1_ready = 1U;
         break;
     case 2:
-        g_out.ind3_p1_on = 1U;        /* IND10 */
+        g_out.ind3_p1_on = 1U;
         break;
     case 3:
-        g_out.ind4_p1_standby = 1U;   /* IND2  */
+        g_out.ind4_p1_standby = 1U;
         break;
     case 4:
-        g_out.ind5_p2_ready = 1U;     /* IND11 */
+        g_out.ind5_p2_ready = 1U;
         break;
     case 5:
-        g_out.ind6_p2_on = 1U;        /* IND3  */
+        g_out.ind6_p2_on = 1U;
         break;
     case 6:
-        g_out.ind7_p2_standby = 1U;   /* IND12 */
+        g_out.ind7_p2_standby = 1U;
         break;
     case 7:
-        g_out.ind8_pressure_low = 1U; /* IND4  */
+        g_out.ind8_pressure_low = 1U;
         break;
     case 8:
     default:
-        g_out.ind9_standby_alarm = 1U; /* IND13 */
+        g_out.ind9_standby_alarm = 1U;
         break;
     }
 }
@@ -736,159 +770,90 @@ static void ApplyLampTestGroupToOutputs(uint8_t group)
     }
 }
 
-static void ApplyLampTestGroupToLedBytes(uint8_t group, uint8_t *led_byte_1, uint8_t *led_byte_2)
+/* Return true once a new DIP selection has been stable for 50 ms. */
+/* Read once after GPIO initialization. Only a reset can select another mode. */
+static MAYBE_UNUSED uint8_t UpdateTestDips(void)
 {
-    switch (group)
-    {
-    case 0:
-    default:
-        *led_byte_2 |= (1U << 0); /* IND9  */
-        *led_byte_1 |= (1U << 0); /* IND1  */
-        *led_byte_2 |= (1U << 1); /* IND10 */
-        break;
-    case 1:
-        *led_byte_1 |= (1U << 1); /* IND2  */
-        *led_byte_2 |= (1U << 2); /* IND11 */
-        *led_byte_1 |= (1U << 2); /* IND3  */
-        break;
-    case 2:
-        *led_byte_2 |= (1U << 3); /* IND12 */
-        *led_byte_1 |= (1U << 3); /* IND4  */
-        *led_byte_2 |= (1U << 4); /* IND13 */
-        break;
-    }
+    if (g_test_initialized)
+        return 0U;
+    g_test_initialized = 1U;
+    g_test_dip_stable =
+        (HAL_GPIO_ReadPin(DIP3_GPIO_Port, DIP3_Pin) == GPIO_PIN_RESET) ? 4U : 0U;
+    return g_test_dip_stable != 0U;
 }
 
 static void RunOutputTestProgram(void)
 {
     uint32_t now = HAL_GetTick();
-    uint8_t ack_active = NormalizeLevel(db_ack_lt1, ACK_LT1_ACTIVE_LEVEL);
-
-    g_test_sys_led1 = 0U;
-    g_test_sys_led2 = 0U;
-    g_fault_active_mask = 0U;
-    g_fault_new_mask = 0U;
-    g_fault_prev_active_mask = 0U;
-    g_fault_latched_mask = 0U;
-    g_alarm_latched = 0U;
-
-    if ((ack_active == 0U) && ((now - g_test_relay_tick) >= T_OUTPUT_TEST_STEP_MS))
+    if ((now - g_test_step_tick) >= STBY_LED_TEST_STEP_MS)
     {
-        g_test_relay_tick = now;
-        g_test_relay_step = (uint8_t)((g_test_relay_step + 1U) % 3U);
+        g_test_step_tick = now;
+        g_test_led_step = (uint8_t)((g_test_led_step + 1U) % 220U);
     }
-
-    if (ack_active == 0U)
+    /* 20 IND1..IND9 scans followed by 20 all-on/all-off blinks. */
+    StopAllPumps();
+    g_test_sys_led1 = (g_test_led_step & 1U) == 0U;
+    if (g_test_led_step < 180U)
     {
-        switch (g_test_relay_step)
-        {
-        case 0:
-            g_out.pump1_cmd = 1U;
-            break;
-        case 1:
-            g_out.pump2_cmd = 1U;
-            break;
-        case 2:
-        default:
-            /* 200 ms break before the relay sequence repeats. */
-            break;
-        }
-    }
-
-    if (ack_active != 0U)
-    {
-        uint8_t num_groups;
-        uint8_t start_index;
-        uint8_t i;
-
-        if (g_test_ack_active_last == 0U)
-        {
-            g_test_ack_group_size = 1U;
-            g_test_ack_group_index = 0U;
-            g_test_ack_group_pass = 0U;
-            g_test_led_tick = now;
-        }
-
-        if ((now - g_test_led_tick) >= T_OUTPUT_TEST_STEP_MS)
-        {
-            g_test_led_tick = now;
-
-            num_groups = (uint8_t)((9U + g_test_ack_group_size - 1U) / g_test_ack_group_size);
-            g_test_ack_group_index++;
-
-            if (g_test_ack_group_index >= num_groups)
-            {
-                g_test_ack_group_index = 0U;
-                g_test_ack_group_pass++;
-
-                if (g_test_ack_group_pass >= 2U)
-                {
-                    g_test_ack_group_pass = 0U;
-                    g_test_ack_group_size++;
-
-                    if (g_test_ack_group_size > 9U)
-                    {
-                        g_test_ack_group_size = 1U;
-                    }
-                }
-            }
-        }
-
-        start_index = (uint8_t)(g_test_ack_group_index * g_test_ack_group_size);
-        for (i = 0U; i < g_test_ack_group_size; i++)
-        {
-            uint8_t led_index = (uint8_t)(start_index + i);
-            if (led_index >= 9U)
-            {
-                break;
-            }
-
-            SetTestIndicatorByOrder(led_index);
-        }
-    }
-    else if (g_in.pressure_p1)
-    {
-        g_out.ind1_system_ready = 1U;  /* IO3 -> IND9 */
-    }
-    else if (g_in.rpm_p1)
-    {
-        g_out.ind2_p1_ready = 1U;      /* IO4 -> IND1 */
-    }
-    else if (g_in.fb_p1)
-    {
-        g_out.ind3_p1_on = 1U;         /* IO5 -> IND10 */
-    }
-    else if (g_in.pressure_p2)
-    {
-        g_out.ind4_p1_standby = 1U;    /* IO6 -> IND2 */
-    }
-    else if (g_in.rpm_p2)
-    {
-        g_out.ind5_p2_ready = 1U;      /* IO7 -> IND11 */
-    }
-    else if (g_in.fb_p2)
-    {
-        g_out.ind6_p2_on = 1U;         /* IO8 -> IND3 */
+        SetTestIndicatorByOrder(g_test_led_step % 9U);
+        g_test_sys_led2 = (uint8_t)!g_test_sys_led1;
     }
     else
     {
-        if ((now - g_test_led_tick) >= T_OUTPUT_TEST_STEP_MS)
-        {
-            g_test_led_tick = now;
-            g_test_led_step = (uint8_t)((g_test_led_step + 1U) % 9U);
-        }
-        SetTestIndicatorByOrder(g_test_led_step);
+        g_test_sys_led2 = g_test_sys_led1;
+        if (g_test_sys_led1)
+            for (uint8_t index = 0U; index < 9U; index++)
+                SetTestIndicatorByOrder(index);
     }
+}
 
-    g_test_ack_active_last = ack_active;
+/* SWD-only diagnostic: raw outputs deliberately bypass relay interlocking.
+   Do not apply the 24 V coil supply while this mode is selected. */
+static MAYBE_UNUSED void RunShiftRegisterPinTest(void)
+{
+    uint32_t now = HAL_GetTick();
+    if (!g_pin_test_initialized)
+    {
+        g_pin_test_initialized = 1U;
+        g_pin_test_byte = 0U;
+        g_pin_test_tick = now;
+    }
+    if ((now - g_pin_test_tick) >= STBY_PIN_TEST_PHASE_MS)
+    {
+        g_pin_test_tick = now;
+        g_pin_test_byte ^= 0xFFU;
+    }
+    g_test_sys_led1 = (g_pin_test_byte != 0U) ? 1U : 0U;
+    g_test_sys_led2 = (uint8_t)!g_test_sys_led1;
 }
 
 static void RunControlLogic(void)
 {
     ClearOutputs();
 
-#if (CONTROL_MODE == CONTROL_MODE_TEST)
-    RunTestModeSection();
+#if (CONTROL_MODE == CONTROL_MODE_PIN_TEST)
+    RunShiftRegisterPinTest();
+#elif (CONTROL_MODE == CONTROL_MODE_TEST)
+    if (UpdateTestDips())
+    {
+        /* Initialize the startup-selected test with an OFF frame. */
+        ResetAutoController();
+        g_test_led_step = 0U;
+        g_test_step_tick = HAL_GetTick();
+        g_test_sys_led1 = 0U;
+        g_test_sys_led2 = 1U;
+        g_lamp_test_active = 0U;
+        g_lamp_test_prev_active = 0U;
+        g_in.lamp_test = 0U;
+        g_in.ack_short = 0U;
+        g_ack_press_tick = HAL_GetTick();
+        g_last_ack_raw = NormalizeLevel(db_ack_lt1, ACK_LT1_ACTIVE_LEVEL);
+        return;
+    }
+    if (g_test_dip_stable != 0U)
+        RunTestModeSection();
+    else
+        RunAutoModeSection();
 #elif (CONTROL_MODE == CONTROL_MODE_MANUAL)
     RunManualModeSection();
 #else
@@ -911,6 +876,17 @@ static MAYBE_UNUSED void RunAutoModeSection(void)
     {
         selector_changed = (g_in.selector != g_auto_primary_pump) ? 1U : 0U;
     }
+
+    /* AC inputs indicate inverter remote permission, not motor running.
+       Permission loss cancels this attempt without recording a run failure. */
+    if (((g_auto_state == AUTO_STATE_TRY_PRIMARY) ||
+         (g_auto_state == AUTO_STATE_PRIMARY_RUNNING)) &&
+        !PumpReady(g_auto_primary_pump))
+        ResetAutoController();
+    else if (((g_auto_state == AUTO_STATE_TRY_SECONDARY) ||
+              (g_auto_state == AUTO_STATE_SECONDARY_RUNNING)) &&
+             !PumpReady(secondary_pump))
+        ResetAutoController();
 
     switch (g_auto_state)
     {
@@ -1126,7 +1102,6 @@ static MAYBE_UNUSED void RunTestModeSection(void)
 {
     UpdateAlarmLatch(0U);
     RunOutputTestProgram();
-    ApplyLampTestIfNeeded();
 }
 
 static void ApplyLampTestIfNeeded(void)
@@ -1155,54 +1130,64 @@ static void ApplyLampTestIfNeeded(void)
     }
 }
 
+static void ApplyRelayInterlock(void)
+{
+    SelectorState_t requested = SELECTOR_OFF;
+    if ((g_out.pump1_cmd != 0U) && (g_out.pump2_cmd == 0U))
+        requested = SELECTOR_P1;
+    else if ((g_out.pump2_cmd != 0U) && (g_out.pump1_cmd == 0U))
+        requested = SELECTOR_P2;
+
+    StopAllPumps();
+    /* Final permission gate applies to both AUTO and MANUAL commands. */
+    if ((requested == SELECTOR_OFF) || !PumpReady(requested))
+        return;
+
+    if ((g_relay_active == requested) ||
+        ((g_relay_active == SELECTOR_OFF) && g_relay_off_confirmed &&
+         ((HAL_GetTick() - g_relay_break_tick) >= T_RELAY_BREAK_BEFORE_MAKE_MS)))
+    {
+        CommandOnlyPump(requested);
+    }
+    /* Otherwise transmit OFF; SR_Write16 starts the gap after the latch. */
+}
+
 static void UpdateOutputs(void)
 {
-    uint8_t relay_byte = 0U;
-    uint8_t led_byte_1 = 0U; /* U3 = IND1..IND8 */
-    uint8_t led_byte_2 = 0U; /* U6 = IND9..IND16 */
+#if (CONTROL_MODE == CONTROL_MODE_PIN_TEST)
+    SR_Write16(g_pin_test_byte, g_pin_test_byte);
+    return;
+#endif
+    uint8_t near_u2 = 0U; /* QA..QH drive IND8..IND1. */
+    uint8_t far_u5 = 0U;  /* QA=IND9, QG=Q1, QH=Q2. */
 
-    /* DC output order:
-       Q1 = Output pump 1
-       Q2 = Output pump 2
-       Q3 = unused / reserved
-    */
+    ApplyRelayInterlock();
 
-    /* Relay board wiring is reversed: QA..QH drive Q8..Q1 through the ULN stage. */
     if (g_out.pump1_cmd)
-        relay_byte |= (1U << 7); /* Q1 = Output pump 1 */
+        far_u5 |= (1U << 6); /* U5 QG -> ULN O7 -> Q1 */
     if (g_out.pump2_cmd)
-        relay_byte |= (1U << 6); /* Q2 = Output pump 2 */
+        far_u5 |= (1U << 7); /* U5 QH -> ULN O8 -> Q2 */
 
-    /* U3 : IND1..IND8 */
-    if (g_out.ind2_p1_ready)
-        led_byte_1 |= (1U << 0); /* IND1  */
-    if (g_out.ind4_p1_standby)
-        led_byte_1 |= (1U << 1); /* IND2  */
-    if (g_out.ind6_p2_on)
-        led_byte_1 |= (1U << 2); /* IND3  */
-    if (g_out.ind8_pressure_low)
-        led_byte_1 |= (1U << 3); /* IND4  */
-
-    /* U6 : IND9..IND16 */
     if (g_out.ind1_system_ready)
-        led_byte_2 |= (1U << 0); /* IND9  */
+        near_u2 |= (1U << 7);
+    if (g_out.ind2_p1_ready)
+        near_u2 |= (1U << 6);
     if (g_out.ind3_p1_on)
-        led_byte_2 |= (1U << 1); /* IND10 */
+        near_u2 |= (1U << 5);
+    if (g_out.ind4_p1_standby)
+        near_u2 |= (1U << 4);
     if (g_out.ind5_p2_ready)
-        led_byte_2 |= (1U << 2); /* IND11 */
+        near_u2 |= (1U << 3);
+    if (g_out.ind6_p2_on)
+        near_u2 |= (1U << 2);
     if (g_out.ind7_p2_standby)
-        led_byte_2 |= (1U << 3); /* IND12 */
+        near_u2 |= (1U << 1);
+    if (g_out.ind8_pressure_low)
+        near_u2 |= (1U << 0);
     if (g_out.ind9_standby_alarm)
-        led_byte_2 |= (1U << 4); /* IND13 */
+        far_u5 |= (1U << 0);
 
-    if (g_in.lamp_test)
-    {
-        led_byte_1 = 0U;
-        led_byte_2 = 0U;
-        ApplyLampTestGroupToLedBytes(g_lamp_test_group_step, &led_byte_1, &led_byte_2);
-    }
-
-    SR_Write24(relay_byte, led_byte_1, led_byte_2);
+    SR_Write16(far_u5, near_u2);
 }
 
 /* USER CODE END 0 */
@@ -1237,12 +1222,13 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_SPI1_Init();
+  MX_SPI2_Init();
   /* USER CODE BEGIN 2 */
 
+    SR_Write16(0U, 0U);
     ReadRawInputs();
     PrimeDebouncedInputs();
     ProcessInputs();
-    SR_Write24(0U, 0U, 0U);
 
   /* USER CODE END 2 */
 
@@ -1280,10 +1266,14 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 8;
+  RCC_OscInitStruct.PLL.PLLN = 336;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLQ = 7;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -1293,12 +1283,12 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5) != HAL_OK)
   {
     Error_Handler();
   }
@@ -1327,7 +1317,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_64;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_256;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -1339,6 +1329,43 @@ static void MX_SPI1_Init(void)
   /* USER CODE BEGIN SPI1_Init 2 */
 
   /* USER CODE END SPI1_Init 2 */
+
+}
+
+/**
+  * @brief SPI2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SPI2_Init(void)
+{
+
+  /* USER CODE BEGIN SPI2_Init 0 */
+
+  /* USER CODE END SPI2_Init 0 */
+
+  /* USER CODE BEGIN SPI2_Init 1 */
+
+  /* USER CODE END SPI2_Init 1 */
+  hspi2.Instance = SPI2;
+  hspi2.Init.Mode = SPI_MODE_MASTER;
+  hspi2.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi2.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi2.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi2.Init.NSS = SPI_NSS_SOFT;
+  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_256;
+  hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi2.Init.CRCPolynomial = 10;
+  if (HAL_SPI_Init(&hspi2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN SPI2_Init 2 */
+
+  /* USER CODE END SPI2_Init 2 */
 
 }
 
@@ -1368,7 +1395,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(SR_LATCH_GPIO_Port, SR_LATCH_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(SR_OE_GPIO_Port, SR_OE_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(SPI2_SH_LD_GPIO_Port, SPI2_SH_LD_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pins : SYS_LED1_Pin SYS_LED2_Pin */
   GPIO_InitStruct.Pin = SYS_LED1_Pin|SYS_LED2_Pin;
@@ -1377,24 +1404,19 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : ACK_LT1_Pin PH1_Pin */
-  GPIO_InitStruct.Pin = ACK_LT1_Pin|PH1_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : SR_LATCH_Pin SR_OE_Pin */
-  GPIO_InitStruct.Pin = SR_LATCH_Pin|SR_OE_Pin;
+  /*Configure GPIO pin : SR_LATCH_Pin */
+  GPIO_InitStruct.Pin = SR_LATCH_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : SEL_P1_Pin SEL_P2_Pin */
-  GPIO_InitStruct.Pin = SEL_P1_Pin|SEL_P2_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  /*Configure GPIO pin : SPI2_SH_LD_Pin */
+  GPIO_InitStruct.Pin = SPI2_SH_LD_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(SPI2_SH_LD_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : I1_Pin I2_Pin */
   GPIO_InitStruct.Pin = I1_Pin|I2_Pin;
@@ -1408,10 +1430,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(I3_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : I4_Pin I5_Pin I6_Pin I7_Pin
-                           I8_Pin AC1_IN_Pin AC2_IN_Pin */
-  GPIO_InitStruct.Pin = I4_Pin|I5_Pin|I6_Pin|I7_Pin
-                          |I8_Pin|AC1_IN_Pin|AC2_IN_Pin;
+  /*Configure GPIO pins : DIP1_Pin DIP2_Pin DIP3_Pin I4_Pin I5_Pin I6_Pin */
+  GPIO_InitStruct.Pin = DIP1_Pin|DIP2_Pin|DIP3_Pin|I4_Pin|I5_Pin|I6_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);

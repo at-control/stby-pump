@@ -1,0 +1,6 @@
+{
+  "cmake.useCMakePresets": "always",
+  "cmake.configureOnOpen": false,
+  "cmake.defaultConfigurePreset": "stm32-debug",
+  "cmake.defaultBuildPreset": "stm32-debug"
+}
