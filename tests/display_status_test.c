@@ -23,8 +23,10 @@ int run_tests(void)
     g_in.pressure_p1 = 0; g_in.pressure_p2 = 1;
     tick(920); CHECK(latched[1] == 0xCF);
 
-    /* Moving DIP3 at runtime does not replace production status. */
+    /* Live test replaces status; returning to AUTO restores live indicators. */
     switches = 4; tick(1000); tick(1060); tick(1080);
+    CHECK(latched[1] == 0x80 && latched[0] == 0);
+    switches = 0; tick(1100); tick(1160); tick(1180);
     CHECK(latched[1] == 0xCF && (latched[0] & 1) == 0);
     memset(&g_in, 0, sizeof(g_in));
     tick(1200); CHECK(latched[1] == 0x80);

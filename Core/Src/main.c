@@ -190,6 +190,8 @@ static uint32_t g_lamp_test_tick = 0U;
 static uint8_t g_test_led_step = 0U;
 static uint32_t g_test_step_tick = 0U;
 static uint8_t g_test_dip_stable = 0U;
+static uint8_t g_test_dip_candidate = 0U;
+static uint32_t g_test_dip_tick = 0U;
 static uint8_t g_test_initialized = 0U;
 static uint8_t g_pin_test_initialized = 0U;
 static uint8_t g_pin_test_byte = 0U;
@@ -771,15 +773,31 @@ static void ApplyLampTestGroupToOutputs(uint8_t group)
 }
 
 /* Return true once a new DIP selection has been stable for 50 ms. */
-/* Read once after GPIO initialization. Only a reset can select another mode. */
+/* Select safely at boot, then accept live changes after stable debounce. */
 static MAYBE_UNUSED uint8_t UpdateTestDips(void)
 {
-    if (g_test_initialized)
-        return 0U;
-    g_test_initialized = 1U;
-    g_test_dip_stable =
-        (HAL_GPIO_ReadPin(DIP3_GPIO_Port, DIP3_Pin) == GPIO_PIN_RESET) ? 4U : 0U;
-    return g_test_dip_stable != 0U;
+    uint32_t now = HAL_GetTick();
+    uint8_t dip = (HAL_GPIO_ReadPin(DIP3_GPIO_Port, DIP3_Pin) == GPIO_PIN_RESET) ? 4U : 0U;
+    if (!g_test_initialized)
+    {
+        g_test_initialized = 1U;
+        g_test_dip_stable = dip;
+        g_test_dip_candidate = dip;
+        g_test_dip_tick = now;
+        return dip != 0U;
+    }
+    if (dip != g_test_dip_candidate)
+    {
+        g_test_dip_candidate = dip;
+        g_test_dip_tick = now;
+    }
+    else if (dip != g_test_dip_stable &&
+             (now - g_test_dip_tick) >= STBY_TEST_DIP_DEBOUNCE_MS)
+    {
+        g_test_dip_stable = dip;
+        return 1U;
+    }
+    return 0U;
 }
 
 static void RunOutputTestProgram(void)
@@ -836,7 +854,8 @@ static void RunControlLogic(void)
 #elif (CONTROL_MODE == CONTROL_MODE_TEST)
     if (UpdateTestDips())
     {
-        /* Initialize the startup-selected test with an OFF frame. */
+        /* Reset mode state and require a fresh confirmed OFF interval. */
+        g_relay_off_confirmed = 0U;
         ResetAutoController();
         g_test_led_step = 0U;
         g_test_step_tick = HAL_GetTick();

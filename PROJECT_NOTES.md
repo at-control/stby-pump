@@ -1,6 +1,6 @@
 # Project Notes
 
-> **Current image:** DIP3 ON at startup runs the LED-only durability test. All DIPs OFF
+> **Current image:** DIP3 ON runs the LED-only durability test. All DIPs OFF
 > runs production AUTO. DIP1/DIP2 are reserved. The test repeats 20 IND1..IND9
 > scans, then 20 all-LED blinks, at 60 ms per step. Both relays remain OFF.
 > The raw all-output PIN_TEST diagnostic is disabled.
@@ -40,11 +40,13 @@ SYS LEDs alternate during scans and blink together during the all-LED phase.
 Both relay commands remain OFF; process/panel inputs, including AC and ACK,
 do not affect the pattern. DIP1 and DIP2 are reserved and ignored.
 
-DIP3 is read once at startup. DIP3 OFF at startup selects production AUTO;
-DIP3 ON at startup selects the LED test. Moving any DIP while powered has no
-effect: restart/reset the module to change mode. DIP1/DIP2 remain reserved.
-Normal inputs can request a pump in AUTO. The confirmed 100 ms relay
-break-before-make protection remains active.
+DIP3 changes mode while powered; no restart is needed. Changes must remain
+stable for 50 ms. DIP3 ON enters the LED test and commands both relays OFF.
+DIP3 OFF returns to AUTO with fresh controller state and a new confirmed
+100 ms OFF interval before a relay can start. AUTO still requires the matching
+inverter permission and normal demand. DIP1/DIP2 remain reserved and ignored.
+Entering test stops running pumps; returning to AUTO may start a pump.
+
 
 ## Input conventions
 

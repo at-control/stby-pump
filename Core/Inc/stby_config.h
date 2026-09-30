@@ -9,12 +9,13 @@
 #define STBY_CONTROL_MODE_PIN_TEST 3U
 #define STBY_PIN_TEST_PHASE_MS 3000U
 
-/* DIP3 sampled once at startup: closed = LED test; otherwise production AUTO.
+/* DIP3 live selection: closed = LED test; otherwise production AUTO.
  * DIP1 and DIP2 are reserved. */
 #ifndef STBY_CONTROL_MODE
 #define STBY_CONTROL_MODE STBY_CONTROL_MODE_TEST
 #endif
 #define STBY_LED_TEST_STEP_MS 60U
+#define STBY_TEST_DIP_DEBOUNCE_MS 50U
 
 /* AUTO/MANUAL lamp test and relay safety timing. */
 #define STBY_OUTPUT_TEST_STEP_MS       200U

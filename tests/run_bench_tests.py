@@ -52,4 +52,4 @@ with output.open("rb") as source:
     failure = cpu.reg_read(UC_ARM_REG_R0)
     if failure:
         raise SystemExit(f"FAIL: tests/{source_name}.c:{failure}")
-print("PASS: production display status, startup mode selection and runtime DIP immunity" if args.display_status else "PASS: 595 pin test, all 16 outputs, phase timing, SYS LEDs, input independence, tick wrap" if args.pin_test else "PASS: production AUTO flow, DIP3 LED durability pattern and relay inhibition, startup mode latching, SPI recovery, tick wrap")
+print("PASS: production display status, live DIP override and production restoration" if args.display_status else "PASS: 595 pin test, all 16 outputs, phase timing, SYS LEDs, input independence, tick wrap" if args.pin_test else "PASS: production AUTO flow, DIP3 LED durability pattern and relay inhibition, live mode transitions and debounce, SPI recovery, tick wrap")
