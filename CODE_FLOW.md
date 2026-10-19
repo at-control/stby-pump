@@ -132,19 +132,33 @@ In manual mode:
 
 ## DIP-selected Production / Test Mode
 
-DIP3 ON (closed to GND, PB2 / S1 contacts 1-4) selects the LED durability test.
-It repeats 20 complete IND1 -> IND9 scans, then 20 all-on/all-off blinks.
-Each LED step and blink half-period lasts 60 ms (nominal 13.2 s per pattern).
-SYS LEDs alternate during scans and blink together during the all-LED phase.
-Both relay commands remain OFF; process/panel inputs, including AC and ACK,
-do not affect the pattern. DIP1 and DIP2 are reserved and ignored.
+The DIP switches encode a decimal mode: DIP1=1, DIP2=2, DIP3=4.
+Binary is written DIP3-DIP2-DIP1; ON means closed to GND.
 
-DIP3 changes mode while powered; no restart is needed. Changes must remain
-stable for 50 ms. DIP3 ON enters the LED test and commands both relays OFF.
-DIP3 OFF returns to AUTO with fresh controller state and a new confirmed
-100 ms OFF interval before a relay can start. AUTO still requires the matching
-inverter permission and normal demand. DIP1/DIP2 remain reserved and ignored.
-Entering test stops running pumps; returning to AUTO may start a pump.
+| Decimal | Binary | Switches ON | Operation |
+|---|---|---|---|
+| 0 | 000 | None | Production AUTO |
+| 1 | 001 | DIP1 | LED durability test, relays OFF |
+| 2 | 010 | DIP2 | All nine display LEDs, both SYS LEDs and both relays steadily ON |
+| 3..7 | 011..111 | Other combinations | All commanded outputs OFF |
+
+Mode 1 repeats 20 IND1 -> IND9 scans followed by 20 all-on/all-off blinks,
+with 60 ms per LED step or blink half-period (nominal 13.2 s per pattern).
+SYS LEDs alternate during scans and blink together during the blink phase.
+Process/panel inputs do not affect either test mode.
+
+Mode 2 is for bench testing with pump starters/field loads disconnected: it
+bypasses inverter AC permission and the normal mutual exclusion of the two
+relay commands. The LEDs are steady and both relay coils energize if the 24 V
+coil supply is present. Unused 595 outputs are kept LOW (U5=0xC1, U2=0xFF).
+
+Modes change live without restarting after 50 ms of stable switch levels.
+Each accepted change resets controller state, transmits an OFF frame, and
+requires a fresh confirmed 100 ms OFF interval before relay activation.
+Failed SPI writes require another successful OFF frame and the full interval.
+Returning to mode 0 may start a pump if normal demand and AC permission exist.
+DIP1=PB0/S1 contacts 3-6; DIP2=PB1/contacts 2-5; DIP3=PB2/contacts 1-4.
+
 
 
 ## Alarm Behavior
@@ -233,7 +247,7 @@ Instead it cycles these 3-indicator groups repeatedly:
 - `IND4 + IND5 + IND6`
 - `IND7 + IND8 + IND9`
 
-This grouped behavior is used in production AUTO and MANUAL once the long-press threshold is reached. With DIP3 ON, the LED durability test ignores ACK.
+This grouped behavior is used in production AUTO and MANUAL once the long-press threshold is reached. In mode 1, the LED durability test ignores ACK.
 
 ## Board LED Behavior
 

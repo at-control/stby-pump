@@ -16,17 +16,18 @@ parser = argparse.ArgumentParser()
 group = parser.add_mutually_exclusive_group()
 group.add_argument('--pin-test', action='store_true')
 group.add_argument('--display-status', action='store_true')
+parser.add_argument("--optimize", choices=["Og", "Os"], default="Og")
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[1]
 source_name = "pin_test" if args.pin_test else "display_status_test" if args.display_status else "bench_test"
 toolchain = Path(os.environ.get("STM32_TOOLCHAIN_PATH", str(
     Path(os.environ["LOCALAPPDATA"]) / "stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin")))
-output = root / f"build/{source_name}.elf"
+output = root / f"build/{source_name}_{args.optimize}.elf"
 output.parent.mkdir(exist_ok=True)
 includes = ["Core/Inc", "Drivers/STM32F4xx_HAL_Driver/Inc",
             "Drivers/CMSIS/Device/ST/STM32F4xx/Include", "Drivers/CMSIS/Include"]
 subprocess.run([str(toolchain / "arm-none-eabi-gcc.exe"),
-                "-mcpu=cortex-m4", "-mthumb", "-mfloat-abi=soft", "-Og", "-g",
+                "-mcpu=cortex-m4", "-mthumb", "-mfloat-abi=soft", "-" + args.optimize, "-g",
                 "-ffunction-sections", "-fdata-sections", "-fno-builtin",
                 "-DUSE_HAL_DRIVER", "-DSTM32F405xx",
                 "-DSTBY_CONTROL_MODE=" + ("3" if args.pin_test else "2"),
@@ -45,11 +46,11 @@ with output.open("rb") as source:
             cpu.mem_write(section["sh_addr"], section.data())
     cpu.reg_write(UC_ARM_REG_SP, 0x2000FFF0)
     cpu.reg_write(UC_ARM_REG_LR, 0xF0001)
-    cpu.emu_start(symbols["run_tests"] | 1, 0xF0000, count=2000000)
+    cpu.emu_start(symbols["run_tests"] | 1, 0xF0000, count=10000000)
     from unicorn.arm_const import UC_ARM_REG_PC
     if cpu.reg_read(UC_ARM_REG_PC) != 0xF0000:
         raise SystemExit("FAIL: test did not return within instruction limit")
     failure = cpu.reg_read(UC_ARM_REG_R0)
     if failure:
         raise SystemExit(f"FAIL: tests/{source_name}.c:{failure}")
-print("PASS: production display status, live DIP override and production restoration" if args.display_status else "PASS: 595 pin test, all 16 outputs, phase timing, SYS LEDs, input independence, tick wrap" if args.pin_test else "PASS: production AUTO flow, DIP3 LED durability pattern and relay inhibition, live mode transitions and debounce, SPI recovery, tick wrap")
+print("PASS: production display status, live DIP override and production restoration" if args.display_status else "PASS: 595 pin test, all 16 outputs, phase timing, SYS LEDs, input independence, tick wrap" if args.pin_test else "PASS: production AUTO flow, DIP modes 0/1/2, LED patterns and steady bench outputs, live mode transitions and debounce, SPI recovery, tick wrap")

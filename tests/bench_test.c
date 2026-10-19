@@ -92,16 +92,16 @@ int run_tests(void)
     g_in.ack_short = 0; g_in.selector = SELECTOR_OFF;
     tick(6040); CHECK((latched[0] & 0xC0) == 0);
 
-    /* DIP1/2 remain production; DIP3 inhibits relays even at boot. */
+    /* Exact binary codes: only AUTO runs a single pump; mode 2 runs both. */
     for (uint8_t dip = 0; dip < 8; dip++)
     {
         reset(dip); g_in.selector = SELECTOR_P1;
         g_in.pressure_p1 = 1; g_in.ac_p1 = 1;
         tick(0); tick(49); tick(50); tick(100);
-        CHECK((latched[0] & 0xC0) == ((dip & 4) ? 0 : 0x40));
+        CHECK((latched[0] & 0xC0) == (dip == 0 ? 0x40 : dip == 2 ? 0xC0 : 0));
     }
     /* Two whole patterns, with exact order/count and no relay outputs. */
-    reset(4); tick(0);
+    reset(1); tick(0);
     for (uint32_t slot = 0; slot < 440; slot++)
     {
         g_in.ac_p1 = 1; g_in.ac_p2 = 1;
@@ -119,28 +119,100 @@ int run_tests(void)
     reset(0); g_in.selector = SELECTOR_P1;
     g_in.pressure_p1 = 1; g_in.ac_p1 = 1; g_in.fb_p1 = 1;
     tick(0); tick(100);
-    switches = 4; tick(120); tick(149);
+    switches = 1; tick(120); tick(149);
     switches = 0; tick(150); tick(210);
     CHECK(g_test_dip_stable == 0 && (latched[0] & 0xC0) == 0x40);
-    switches = 4; tick(220); tick(269);
+    switches = 1; tick(220); tick(269);
     CHECK(g_test_dip_stable == 0);
-    tick(270); CHECK(g_test_dip_stable == 4 && latched[0] == 0 && latched[1] == 0);
+    tick(270); CHECK(g_test_dip_stable == 1 && latched[0] == 0 && latched[1] == 0);
     tick(290); CHECK(latched[1] == 0x80 && latched[0] == 0);
     switches = 0; tick(300);
-    switches = 4; tick(320); tick(380);
-    CHECK(g_test_dip_stable == 4 && (latched[0] & 0xC0) == 0);
+    switches = 1; tick(320); tick(380);
+    CHECK(g_test_dip_stable == 1 && (latched[0] & 0xC0) == 0);
     switches = 0; tick(400); tick(449);
-    CHECK(g_test_dip_stable == 4);
+    CHECK(g_test_dip_stable == 1);
     tick(450); CHECK(g_test_dip_stable == 0 && latched[0] == 0);
     tick(470); tick(549); CHECK((latched[0] & 0xC0) == 0);
     tick(550); CHECK((latched[0] & 0xC0) == 0x40);
-    /* DIP1/2 never alter production mode. */
-    switches = 3; tick(570); tick(630);
-    CHECK(g_test_dip_stable == 0 && (latched[0] & 0xC0) == 0x40);
+    /* Undefined codes hold every output OFF. */
+    switches = 3; tick(570); tick(630); tick(650);
+    CHECK(g_test_dip_stable == 3 && latched[0] == 0 && latched[1] == 0);
+    CHECK(sys_led1 == LED_OFF_STATE && sys_led2 == LED_OFF_STATE);
     /* Leaving test with no inverter permission cannot energize either relay. */
-    reset(4); tick(0); g_in.selector = SELECTOR_P1; g_in.pressure_p1 = 1;
+    reset(1); tick(0); g_in.selector = SELECTOR_P1; g_in.pressure_p1 = 1;
     switches = 0; tick(20); tick(70); tick(200);
     CHECK(g_test_dip_stable == 0 && (latched[0] & 0xC0) == 0);
+
+    /* Bench mode is steady, ignores inputs, and starts after the OFF gap. */
+    reset(2); tick(0); tick(99); CHECK((latched[0] & 0xC0) == 0);
+    for (uint32_t now = 100; now < 10000; now += 20)
+    {
+        g_in.ac_p1 = (now / 100) & 1; g_in.ac_p2 = !g_in.ac_p1;
+        g_in.selector = SELECTOR_P1; g_in.lamp_test = 1; g_in.ack_short = 1;
+        tick(now);
+        CHECK(latched[0] == 0xC1 && latched[1] == 0xFF);
+        CHECK(sys_led1 == LED_ON_STATE && sys_led2 == LED_ON_STATE);
+    }
+    /* Switching to blink clears both relays. Switching to AUTO needs permission. */
+    switches = 1; tick(10000); tick(10050);
+    CHECK(latched[0] == 0 && latched[1] == 0);
+    tick(10070); CHECK(latched[0] == 0 && latched[1] == 0x80);
+    g_in.ac_p1 = 0; g_in.ac_p2 = 0; g_in.pressure_p1 = 1;
+    switches = 0; tick(10090); tick(10140); tick(10300);
+    CHECK((latched[0] & 0xC0) == 0);
+    /* Direct bench->AUTO also requires OFF confirmation and the full gap. */
+    reset(2); tick(0); tick(100);
+    g_in.selector = SELECTOR_P1; g_in.pressure_p1 = 1; g_in.ac_p1 = 1;
+    switches = 0; tick(120); tick(170); tick(190);
+    CHECK((latched[0] & 0xC0) == 0);
+    tick(269); CHECK((latched[0] & 0xC0) == 0);
+    tick(270); CHECK((latched[0] & 0xC0) == 0x40);
+    /* Failed entry OFF must be retried before enabling bench relays. */
+    reset(0); tick(0); switches = 2; tick(20);
+    spi_fail = 1; tick(70); tick(200); CHECK(latched[0] == 0);
+    spi_fail = 0; tick(300); tick(399); CHECK((latched[0] & 0xC0) == 0);
+    tick(400); CHECK(latched[0] == 0xC1);
+    /* Failed steady bench writes require another confirmed OFF + 100 ms. */
+    spi_fail = 1; tick(420); spi_fail = 0; tick(600);
+    CHECK((latched[0] & 0xC0) == 0);
+    tick(699); CHECK((latched[0] & 0xC0) == 0);
+    tick(700); CHECK(latched[0] == 0xC1);
+
+    /* Every ordered pair of the eight DIP codes, including undefined codes. */
+    for (uint8_t from = 0; from < 8; from++)
+    {
+        for (uint8_t to = 0; to < 8; to++)
+        {
+            reset(from); g_in.selector = SELECTOR_P1;
+            g_in.pressure_p1 = 1; g_in.ac_p1 = 1; g_in.fb_p1 = 1;
+            tick(0); tick(100); tick(200);
+            switches = to; tick(220); tick(269);
+            CHECK(g_test_dip_stable == from);
+            tick(270); CHECK(g_test_dip_stable == to);
+            if (from != to)
+            {
+                CHECK(latched[0] == 0 && latched[1] == 0);
+                if (to != 0)
+                    CHECK(sys_led1 == LED_OFF_STATE && sys_led2 == LED_OFF_STATE);
+                tick(290); tick(369); CHECK((latched[0] & 0xC0) == 0);
+            }
+            tick(370);
+            CHECK((latched[0] & 0xC0) == (to == 0 ? 0x40 : to == 2 ? 0xC0 : 0));
+            if (to >= 3)
+            {
+                CHECK(latched[0] == 0 && latched[1] == 0);
+                CHECK(sys_led1 == LED_OFF_STATE && sys_led2 == LED_OFF_STATE);
+            }
+        }
+    }
+    /* A failed bench exit keeps retrying OFF; AUTO cannot bypass the gap. */
+    reset(2); tick(0); tick(100);
+    g_in.selector = SELECTOR_P1; g_in.pressure_p1 = 1; g_in.ac_p1 = 1;
+    switches = 0; tick(120); spi_fail = 1; tick(170); tick(300);
+    CHECK(latched[0] == 0xC1);
+    spi_fail = 0; tick(400); CHECK((latched[0] & 0xC0) == 0);
+    tick(499); CHECK((latched[0] & 0xC0) == 0);
+    tick(500); CHECK((latched[0] & 0xC0) == 0x40);
 
     /* Failed OFF writes do not count toward the relay gap. */
     reset(0); g_in.selector = SELECTOR_P1; g_in.pressure_p1 = 1; g_in.ac_p1 = 1; tick(0); tick(150);
@@ -202,10 +274,10 @@ int run_tests(void)
     }
 
     /* LED scheduler and live DIP debounce survive tick rollover. */
-    reset(4); tick(0xFFFFFFF0U);
+    reset(1); tick(0xFFFFFFF0U);
     switches = 0; tick(0x2BU); CHECK(latched[1] == 0x80);
     tick(0x2CU); CHECK(latched[1] == 0x40 && latched[0] == 0);
-    CHECK(g_test_dip_stable == 4);
+    CHECK(g_test_dip_stable == 1);
     tick(0x5DU); CHECK(g_test_dip_stable == 0 && latched[0] == 0);
     return 0;
 }

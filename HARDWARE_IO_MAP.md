@@ -63,7 +63,7 @@ do not confuse that component reference with the relay-drive net Q1.
 | Output latch | PA4 | U2/U5 RCLK | GPIO output |
 | Output clock | PA5 | U2/U5 SRCLK | SPI1 SCK |
 | Output data | PA7 | U2 SER | SPI1 MOSI |
-| DIP 1..3 | PB0, PB1, PB2 | S1, 10 kOhm pull-ups | DIP3 LED durability test; DIP1/2 reserved |
+| DIP 1..3 | PB0, PB1, PB2 | S1, 10 kOhm pull-ups | DIP1=1, DIP2=2, DIP3=4; modes 0/1/2 |
 | DI1 | PC11 | OPTO1 collector | Pressure Pump 1 |
 | DI2 | PC12 | OPTO2 collector | RPM Pump 1 |
 | DI3 | PD2 | OPTO3 collector | Feedback Pump 1 |
@@ -182,19 +182,33 @@ S1 contact order is reversed relative to the firmware DIP numbering:
 | 3-6 | DIP1 | PB0, U6 pin 26 |
 
 Each DIP signal has a 10 kOhm pull-up to 3.3V; closing the switch reads low.
-DIP3 ON (closed to GND, PB2 / S1 contacts 1-4) selects the LED durability test.
-It repeats 20 complete IND1 -> IND9 scans, then 20 all-on/all-off blinks.
-Each LED step and blink half-period lasts 60 ms (nominal 13.2 s per pattern).
-SYS LEDs alternate during scans and blink together during the all-LED phase.
-Both relay commands remain OFF; process/panel inputs, including AC and ACK,
-do not affect the pattern. DIP1 and DIP2 are reserved and ignored.
+The DIP switches encode a decimal mode: DIP1=1, DIP2=2, DIP3=4.
+Binary is written DIP3-DIP2-DIP1; ON means closed to GND.
 
-DIP3 changes mode while powered; no restart is needed. Changes must remain
-stable for 50 ms. DIP3 ON enters the LED test and commands both relays OFF.
-DIP3 OFF returns to AUTO with fresh controller state and a new confirmed
-100 ms OFF interval before a relay can start. AUTO still requires the matching
-inverter permission and normal demand. DIP1/DIP2 remain reserved and ignored.
-Entering test stops running pumps; returning to AUTO may start a pump.
+| Decimal | Binary | Switches ON | Operation |
+|---|---|---|---|
+| 0 | 000 | None | Production AUTO |
+| 1 | 001 | DIP1 | LED durability test, relays OFF |
+| 2 | 010 | DIP2 | All nine display LEDs, both SYS LEDs and both relays steadily ON |
+| 3..7 | 011..111 | Other combinations | All commanded outputs OFF |
+
+Mode 1 repeats 20 IND1 -> IND9 scans followed by 20 all-on/all-off blinks,
+with 60 ms per LED step or blink half-period (nominal 13.2 s per pattern).
+SYS LEDs alternate during scans and blink together during the blink phase.
+Process/panel inputs do not affect either test mode.
+
+Mode 2 is for bench testing with pump starters/field loads disconnected: it
+bypasses inverter AC permission and the normal mutual exclusion of the two
+relay commands. The LEDs are steady and both relay coils energize if the 24 V
+coil supply is present. Unused 595 outputs are kept LOW (U5=0xC1, U2=0xFF).
+
+Modes change live without restarting after 50 ms of stable switch levels.
+Each accepted change resets controller state, transmits an OFF frame, and
+requires a fresh confirmed 100 ms OFF interval before relay activation.
+Failed SPI writes require another successful OFF frame and the full interval.
+Returning to mode 0 may start a pump if normal demand and AC permission exist.
+DIP1=PB0/S1 contacts 3-6; DIP2=PB1/contacts 2-5; DIP3=PB2/contacts 1-4.
+
 
 
 ## Bring-up checks tied to this wiring
@@ -203,7 +217,7 @@ Entering test stops running pumps; returning to AUTO may start a pump.
 - Check each J2 input independently and confirm both its MCU level and firmware meaning, especially RPM polarity.
 - Confirm U3 bit order using known display contacts and AC sensing inputs.
 - Check IND1..IND9 and K1/K2 independently against the connector tables.
-- DIP3 ON enables the LED-only test with relays OFF. All DIPs OFF runs production AUTO.
+- Mode 1 enables the LED-only test with relays OFF; mode 2 enables both relays for bench testing. All DIPs OFF runs production AUTO.
 - Y1 is 8 MHz; HAL/CMSIS HSE definitions now match. Verify physical timing on the assembled board.
 
 ## Temporary 595 voltage measurement mode
@@ -224,10 +238,11 @@ for the simulated pin-test checks; omit `--pin-test` to check normal TEST.
 ## Inverter remote/local permission
 
 AC1/AC2 indicate the corresponding inverter remote permission (active = permitted),
-not pump-running feedback. Each relay requires its own permission continuously,
-including in MANUAL mode. Loss is handled on the next input/control pass (nominal
+not pump-running feedback. In production AUTO/MANUAL each relay requires its own permission continuously.
+Bench mode 2 is the explicit exception. Loss is handled on the next input/control pass (nominal
 20 ms loop, plus hardware sensing delay). AUTO cancels the current attempt and
 re-evaluates available pumps, retaining the 100 ms relay transfer gap. Permission
 loss itself is not recorded as a pump-running feedback timeout. DI3/DI6 remain
 separate pump-running feedback inputs with the existing 3-second start timeout.
-DIP3 LED durability mode keeps both relays OFF regardless of permission.
+Mode 1 keeps both relays OFF. Bench mode 2 explicitly bypasses AC permission
+and relay mutual exclusion; the confirmed OFF gap still applies.

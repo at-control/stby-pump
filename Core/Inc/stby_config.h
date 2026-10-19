@@ -9,11 +9,15 @@
 #define STBY_CONTROL_MODE_PIN_TEST 3U
 #define STBY_PIN_TEST_PHASE_MS 3000U
 
-/* DIP3 live selection: closed = LED test; otherwise production AUTO.
- * DIP1 and DIP2 are reserved. */
+/* DIP1=1, DIP2=2, DIP3=4; displayed binary order is DIP3..DIP1.
+ * 0=AUTO, 1=LED blink (relays OFF), 2=all outputs ON (bench only).
+ * Other codes hold outputs OFF. */
 #ifndef STBY_CONTROL_MODE
 #define STBY_CONTROL_MODE STBY_CONTROL_MODE_TEST
 #endif
+#define STBY_DIP_MODE_AUTO       0U
+#define STBY_DIP_MODE_LED_BLINK  1U
+#define STBY_DIP_MODE_ALL_ON     2U
 #define STBY_LED_TEST_STEP_MS 60U
 #define STBY_TEST_DIP_DEBOUNCE_MS 50U
 

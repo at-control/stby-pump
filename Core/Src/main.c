@@ -201,6 +201,7 @@ static uint8_t g_test_sys_led2 = 0U;
 /* State of the last successfully latched relay frame. */
 static SelectorState_t g_relay_active = SELECTOR_INVALID;
 static uint8_t g_relay_off_confirmed = 0U;
+static uint8_t g_bench_both_latched = 0U;
 static uint32_t g_relay_break_tick = 0U;
 
 /* Debounced values */
@@ -479,6 +480,7 @@ static void SR_Write16(uint8_t far_u5, uint8_t near_u2)
     {
         SelectorState_t latched = SELECTOR_OFF;
         SR_LatchPulse();
+        g_bench_both_latched = ((far_u5 & 0xC0U) == 0xC0U);
         if ((far_u5 & 0xC0U) == 0x40U)
             latched = SELECTOR_P1;
         else if ((far_u5 & 0xC0U) == 0x80U)
@@ -502,6 +504,7 @@ static void SR_Write16(uint8_t far_u5, uint8_t near_u2)
     {
         /* Force a confirmed OFF frame and a fresh gap before any restart. */
         g_relay_active = SELECTOR_INVALID;
+        g_bench_both_latched = 0U;
         g_relay_off_confirmed = 0U;
     }
 }
@@ -777,7 +780,10 @@ static void ApplyLampTestGroupToOutputs(uint8_t group)
 static MAYBE_UNUSED uint8_t UpdateTestDips(void)
 {
     uint32_t now = HAL_GetTick();
-    uint8_t dip = (HAL_GPIO_ReadPin(DIP3_GPIO_Port, DIP3_Pin) == GPIO_PIN_RESET) ? 4U : 0U;
+    uint8_t dip = 0U;
+    if (HAL_GPIO_ReadPin(DIP1_GPIO_Port, DIP1_Pin) == GPIO_PIN_RESET) dip |= 1U;
+    if (HAL_GPIO_ReadPin(DIP2_GPIO_Port, DIP2_Pin) == GPIO_PIN_RESET) dip |= 2U;
+    if (HAL_GPIO_ReadPin(DIP3_GPIO_Port, DIP3_Pin) == GPIO_PIN_RESET) dip |= 4U;
     if (!g_test_initialized)
     {
         g_test_initialized = 1U;
@@ -856,11 +862,12 @@ static void RunControlLogic(void)
     {
         /* Reset mode state and require a fresh confirmed OFF interval. */
         g_relay_off_confirmed = 0U;
+        g_bench_both_latched = 0U;
         ResetAutoController();
         g_test_led_step = 0U;
         g_test_step_tick = HAL_GetTick();
         g_test_sys_led1 = 0U;
-        g_test_sys_led2 = 1U;
+        g_test_sys_led2 = 0U;
         g_lamp_test_active = 0U;
         g_lamp_test_prev_active = 0U;
         g_in.lamp_test = 0U;
@@ -869,10 +876,26 @@ static void RunControlLogic(void)
         g_last_ack_raw = NormalizeLevel(db_ack_lt1, ACK_LT1_ACTIVE_LEVEL);
         return;
     }
-    if (g_test_dip_stable != 0U)
+    if (g_test_dip_stable == STBY_DIP_MODE_LED_BLINK)
         RunTestModeSection();
-    else
+    else if (g_test_dip_stable == STBY_DIP_MODE_ALL_ON)
+    {
+        /* Explicit bench mode: both coils and all indicators held ON. */
+        g_out.pump1_cmd = 1U;
+        g_out.pump2_cmd = 1U;
+        for (uint8_t index = 0U; index < 9U; index++)
+            SetTestIndicatorByOrder(index);
+        g_test_sys_led1 = 1U;
+        g_test_sys_led2 = 1U;
+    }
+    else if (g_test_dip_stable == STBY_DIP_MODE_AUTO)
         RunAutoModeSection();
+    else
+    {
+        /* Undefined DIP codes must not start pumps or a test. */
+        g_test_sys_led1 = 0U;
+        g_test_sys_led2 = 0U;
+    }
 #elif (CONTROL_MODE == CONTROL_MODE_MANUAL)
     RunManualModeSection();
 #else
@@ -1151,6 +1174,19 @@ static void ApplyLampTestIfNeeded(void)
 
 static void ApplyRelayInterlock(void)
 {
+#if (CONTROL_MODE == CONTROL_MODE_TEST)
+    if ((g_test_dip_stable == STBY_DIP_MODE_ALL_ON) &&
+        g_out.pump1_cmd && g_out.pump2_cmd)
+    {
+        /* Bench-only exception to permission/mutual exclusion. Start only
+           after a successfully latched OFF frame and the normal 100 ms gap. */
+        if (!g_bench_both_latched &&
+            !((g_relay_active == SELECTOR_OFF) && g_relay_off_confirmed &&
+              ((HAL_GetTick() - g_relay_break_tick) >= T_RELAY_BREAK_BEFORE_MAKE_MS)))
+            StopAllPumps();
+        return;
+    }
+#endif
     SelectorState_t requested = SELECTOR_OFF;
     if ((g_out.pump1_cmd != 0U) && (g_out.pump2_cmd == 0U))
         requested = SELECTOR_P1;

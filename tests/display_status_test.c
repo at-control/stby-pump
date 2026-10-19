@@ -24,7 +24,7 @@ int run_tests(void)
     tick(920); CHECK(latched[1] == 0xCF);
 
     /* Live test replaces status; returning to AUTO restores live indicators. */
-    switches = 4; tick(1000); tick(1060); tick(1080);
+    switches = 1; tick(1000); tick(1060); tick(1080);
     CHECK(latched[1] == 0x80 && latched[0] == 0);
     switches = 0; tick(1100); tick(1160); tick(1180);
     CHECK(latched[1] == 0xCF && (latched[0] & 1) == 0);
