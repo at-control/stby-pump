@@ -43,9 +43,10 @@ contact needs an appropriate external excitation supply; it is not wired like
 the display's contact-to-ground inputs. Input voltage and load ratings must be
 taken from the fitted circuit/components, not from MCU logic voltage.
 
-The local firmware interprets pressure and feedback as active low, but RPM as
-active high. Thus an energized RPM optocoupler reads as RPM inactive under the
-current configuration; confirm the sensor's intended contact behavior.
+The firmware interprets pressure, RPM and feedback as active low at the MCU
+collector. An energized RPM optocoupler pulls PC12/PB4 LOW and means RPM active.
+An unconnected RPM input is pulled HIGH and means RPM inactive. RPM changes
+retain the 2-second debounce; pressure and feedback retain 200 ms debounce.
 
 Q1/Q2 are internal relay-drive net names, not external powered outputs. U4 O7/O8
 sink K1/K2 coils whose other ends connect to +24V. J3/J4 expose the normally-open

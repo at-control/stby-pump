@@ -101,6 +101,11 @@ Current control logic in `Core/Src/main.c` uses these meanings:
 - `AC1_IN` / `AC2_IN` = selected remote pump is available for module control
 - `Pressure` input = low-pressure indication on the engine
 - `RPM` input = engine can sustain itself without the standby pump
+- RPM is active LOW at the MCU collector: energizing DI2/DI5 means active;
+  leaving the input unconnected reads HIGH and means inactive (2 s debounce)
+- Clearing pressure demand while RPM is inactive keeps the pump requested;
+  pressure healthy AND RPM active clears demand. AC permission and running
+  feedback checks still apply.
 
 For the selected pump:
 

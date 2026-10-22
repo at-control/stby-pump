@@ -257,6 +257,81 @@ int run_tests(void)
     g_in.ac_p2 = 0; tick(4340);
     CHECK(g_auto_state == AUTO_STATE_OFF && (latched[0] & 0xC0) == 0);
 
+    /* Exercise actual raw input polarity for both channels, not just g_in. */
+    for (uint8_t channel = 0; channel < 2; channel++)
+    {
+        uint8_t relay = channel ? 0x80 : 0x40;
+        for (uint8_t pressure_raw = 0; pressure_raw < 2; pressure_raw++)
+        {
+            for (uint8_t rpm_raw = 0; rpm_raw < 2; rpm_raw++)
+            {
+                reset(0); memset(&g_raw, 1, sizeof(g_raw));
+                if (channel)
+                {
+                    g_raw.sel_p2_raw = 0; g_raw.ac_p2_raw = 0;
+                    g_raw.fb_p2_raw = 0;
+                    g_raw.pressure_p2_raw = pressure_raw; g_raw.rpm_p2_raw = rpm_raw;
+                }
+                else
+                {
+                    g_raw.sel_p1_raw = 0; g_raw.ac_p1_raw = 0;
+                    g_raw.fb_p1_raw = 0;
+                    g_raw.pressure_p1_raw = pressure_raw; g_raw.rpm_p1_raw = rpm_raw;
+                }
+                PrimeDebouncedInputs(); ProcessInputs(); tick(0);
+                test_tick = 100; ProcessInputs(); tick(100);
+                CHECK((channel ? g_in.rpm_p2 : g_in.rpm_p1) == !rpm_raw);
+                CHECK((latched[0] & 0xC0) == ((!pressure_raw || rpm_raw) ? relay : 0));
+                /* Even an RPM demand cannot override missing inverter permission. */
+                g_raw.ac_p1_raw = 1; g_raw.ac_p2_raw = 1;
+                test_tick = 120; ProcessInputs(); tick(120);
+                CHECK((latched[0] & 0xC0) == 0);
+            }
+        }
+        reset(0); memset(&g_raw, 1, sizeof(g_raw));
+        uint8_t *pressure = channel ? &g_raw.pressure_p2_raw : &g_raw.pressure_p1_raw;
+        uint8_t *rpm = channel ? &g_raw.rpm_p2_raw : &g_raw.rpm_p1_raw;
+        if (channel) { g_raw.sel_p2_raw = 0; g_raw.ac_p2_raw = 0; g_raw.fb_p2_raw = 0; }
+        else { g_raw.sel_p1_raw = 0; g_raw.ac_p1_raw = 0; g_raw.fb_p1_raw = 0; }
+        *pressure = 0; /* Start on low pressure with the RPM input unconnected/HIGH. */
+        PrimeDebouncedInputs();
+        for (uint32_t now = 0; now <= 1000; now += 20)
+        {
+            if (now == 520) *pressure = 1;
+            test_tick = now; ProcessInputs(); tick(now);
+            if (now >= 100) CHECK((latched[0] & 0xC0) == relay);
+        }
+        CHECK((channel ? g_in.pressure_p2 : g_in.pressure_p1) == 0);
+        CHECK((channel ? g_in.rpm_p2 : g_in.rpm_p1) == 0);
+        /* A brief RPM pulse must not remove demand. */
+        for (uint32_t now = 1020; now <= 1600; now += 20)
+        {
+            *rpm = now < 1520 ? 0 : 1;
+            test_tick = now; ProcessInputs(); tick(now);
+            CHECK((latched[0] & 0xC0) == relay);
+        }
+        /* Stable RPM active stops only after the existing 2-second filter. */
+        *rpm = 0;
+        for (uint32_t now = 1620; now <= 3600; now += 20)
+        {
+            test_tick = now; ProcessInputs(); tick(now);
+            CHECK((latched[0] & 0xC0) == (now < 3600 ? relay : 0));
+        }
+        /* Low pressure still starts a pump even with RPM active. */
+        *pressure = 0;
+        for (uint32_t now = 3620; now <= 3820; now += 20)
+        {
+            test_tick = now; ProcessInputs(); tick(now);
+        }
+        CHECK((latched[0] & 0xC0) == relay);
+        *pressure = 1;
+        for (uint32_t now = 3840; now <= 4060; now += 20)
+        {
+            test_tick = now; ProcessInputs(); tick(now);
+        }
+        CHECK((latched[0] & 0xC0) == 0);
+    }
+
     /* Raw selector transfer: 200 ms debounce then 100 ms confirmed OFF. */
     reset(0); memset(&g_raw, 0, sizeof(g_raw));
     g_raw.sel_p2_raw = 1; g_raw.ack_lt1_raw = 1;

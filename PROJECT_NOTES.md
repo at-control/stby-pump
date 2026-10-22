@@ -65,7 +65,7 @@ DIP1=PB0/S1 contacts 3-6; DIP2=PB1/contacts 2-5; DIP3=PB2/contacts 1-4.
 ## Input conventions
 
 - Pressure: active low, 200 ms debounce
-- RPM: active high, 2 s debounce
+- RPM: active low at the MCU collector, 2 s debounce; unconnected = inactive
 - Feedback: active low, 200 ms debounce
 - AC-ready: active low
 - Selector: active low, 200 ms debounce

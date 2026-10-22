@@ -38,7 +38,8 @@
 
 /* Input semantic polarities after reading the MCU/74HC165 logic level. */
 #define STBY_PRESSURE_ACTIVE_LEVEL 0U
-#define STBY_RPM_ACTIVE_LEVEL      1U
+/* PC817 energized -> collector LOW = RPM active; open input HIGH = inactive. */
+#define STBY_RPM_ACTIVE_LEVEL      0U
 #define STBY_AC_ACTIVE_LEVEL       0U
 #define STBY_FEEDBACK_ACTIVE_LEVEL 0U
 #define STBY_SELECTOR_ACTIVE_LEVEL 0U

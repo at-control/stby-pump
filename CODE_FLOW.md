@@ -53,7 +53,8 @@ The main loop then repeats continuously:
 
 ### RPM
 
-- RPM inputs are treated as active high in firmware
+- RPM inputs are active low at the MCU collector: energized optocoupler = active
+- An unconnected RPM input is pulled HIGH and means RPM inactive
 - `DI2` and `DI5` use external pull-up hardware
 - RPM input debounce is `2 s` using `T_RPM_DEBOUNCE_MS`
 - After normalization, `rpm active` means the engine can support itself using its own pump
